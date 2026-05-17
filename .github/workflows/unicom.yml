@@ -3,7 +3,7 @@ name: 中国联通
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '11 2 * * *'
 
 jobs:
   run:
