@@ -1430,14 +1430,14 @@ class CustomUserService:
             if not await self.online(): return
             for task in [
                 self.pan_speed_task,
-                self.market_task,
+                # self.market_task,
                 self.sign_task,
                 self.xj_task,
                 self.ttlxj_task,
-                self.ltzf_task,
-                self.wostore_cloud_task,
-                self.security_butler_task,
-                self.shangdu_task,
+                # self.ltzf_task,
+                # self.wostore_cloud_task,
+                # self.security_butler_task,
+                # self.shangdu_task,
             ]: await task()
         finally:
             await self.http.close()
