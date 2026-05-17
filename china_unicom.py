@@ -1,0 +1,1453 @@
+import asyncio, base64, hashlib, hmac, json, os, random, string, time, uuid
+from datetime import datetime
+from functools import wraps
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
+
+import httpx
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+
+# ==================== 获取Secret ====================
+chinaUnicomCookie= os.environ["chinaUnicomCookie"] 
+# ====================  Decorators  ====================
+def async_task(task_name=None):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(self, *args, **kwargs):
+            try: return await func(self, *args, **kwargs)
+            except Exception as e: self.logger.log(f"{task_name or func.__name__.replace('_', ' ').strip()}异常: {e}")
+        return wrapper
+    return decorator
+
+def async_task_silent(func):
+    """静默异步任务装饰器：只捕获异常不记录"""
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        try:
+            return await func(self, *args, **kwargs)
+        except Exception:
+            pass
+    return wrapper
+
+def _sec_headers(self):
+    t, c = unquote(self.sec_ticket) if self.sec_ticket else "", f"_jea_id={self.sec_jea_id}" if self.sec_jea_id else ""
+    headers = {"ticket": t, "Cookie": c, "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15", "partnersid": "1702", "clienttype": "uasp_unicom_applet", "pageId": "s768590754920323072", "Content-Type": "application/json;charset=UTF-8"}
+    secret_key = getattr(self, 'sec_secret_key', None)
+    if secret_key:
+        ts = str(int(time.time() * 1000))
+        nonce = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        sig = hmac.new(secret_key.encode('utf-8'), f"{nonce}{ts}".encode('utf-8'), hashlib.sha256).hexdigest()
+        headers.update({"X-Request-Timestamp": ts, "X-Request-Nonce": nonce, "X-Request-Signature": sig})
+    return headers
+
+# ====================  Constants  ====================
+APP_VERSION, SHOW_PRIZE_POOL = "iphone_c@11.0503", True
+MARKET_PRIVILEGE_START_HOUR = 10
+MARKET_PRIVILEGE_STAGGER_SECONDS = 0.15
+MARKET_PRIVILEGE_WARMUP_SECONDS = 20
+MARKET_PRIVILEGE_MAX_RETRIES = 18
+MARKET_PRIVILEGE_DETAIL_TIMEOUT = 4.0
+MARKET_PRIVILEGE_ACTION_TIMEOUT = 4.5
+MARKET_PRIVILEGE_RETRY_DELAYS = (0.10, 0.12, 0.15, 0.18, 0.22, 0.28, 0.36, 0.45, 0.55, 0.70, 0.90, 1.10, 1.30, 1.60, 1.90, 2.20, 2.60, 3.00)
+MARKET_PRIVILEGE_RECORD_TIMEOUT, MARKET_PRIVILEGE_RECORD_CHECK_INTERVAL = 4.0, 2.0
+MARKET_PRIVILEGE_EVENT_THEME = "权益天天领"
+USER_AGENT = lambda v: f"Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 unicom{{version:{v}}}"
+APP_ID = "86b8be06f56ba55e9fa7dff134c6b16c62ca7f319da4a958dd0afa0bf9f36f1daa9922869a8d2313b6f2f9f3b57f2901f0021c4575e4b6949ae18b7f6761d465c12321788dcd980aa1a641789d1188bb"
+CLIENT_ID = "73b138fd-250c-4126-94e2-48cbcc8b9cbe"
+WOCARE_CHANNEL_ID, WOCARE_SIGN_KEY, WOCARE_CHANNEL_TYPE, WOCARE_VERSION = "beea1c7edf7c4989b2d3621c4255132f", "f4cd4ffeb5554586acf65ba7110534f5", "wocareMBHServiceLife1", "1"
+EXCHANGE_COUPON_CONFIG = {"1元话费券": False, "3元话费券": False, "5元话费券": False, "10元话费券": False, "18元话费券": False}
+COUPON_PRODUCT_MAP = {k: v for k, v in zip(EXCHANGE_COUPON_CONFIG.keys(), ["25122309441216995", "25122309482612026", "25122309512816188", "25122309543215732", "25122310293512803"])}
+COUPON_POINTS_REQUIRED = {k: int(k.split("元")[0]) * 100 for k in EXCHANGE_COUPON_CONFIG}
+WOSTORE_CLOUD_CHANNEL_ID = "ST-Zujian001-gs"
+WOSTORE_CLOUD_CP_ID = "91002997"
+WOSTORE_CLOUD_ACTIVITY_CODE = "HD2026033000125"
+WOSTORE_CLOUD_POINTS_SIGN_CODE = "Points_Sign_2507"
+WOSTORE_CLOUD_DIALOG_URL = f"https://h5forphone.wostore.cn/cloudPhone/dialogCloudPhone.html?channel_id={WOSTORE_CLOUD_CHANNEL_ID}&cp_id={WOSTORE_CLOUD_CP_ID}"
+WOSTORE_CLOUD_POINTS_TASK_CODE = "2508-01"
+PAN_SPEED_ACTIVITY_ID = "Mjc="
+PAN_SPEED_ACTIVITY_CLIENT_ID = "1001000156"
+PAN_SPEED_CLOUD_CLIENT_ID = "1001000003"
+PAN_SPEED_OPEN_APP_ID = "edop_unicom_d67b3e30"
+PAN_SPEED_APP_VERSION = "iphone_c@12.1001"
+PAN_SPEED_TOUCHPOINT = "300200030001"
+PAN_SPEED_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 unicom{version:iphone_c@12.1001};ltst;OSVersion/16.6"
+PAN_SPEED_AES_IV = "wNSOYIB1k1DjY5lA"
+PAN_SPEED_DISPATCHER_KEY = "Py1J67PAQoCb8Iel"
+PAN_SPEED_POINT_KEY = "oN6@sH8!fV1{vJ1#"
+PAN_SPEED_POINT_IV = "rE6bK2lY5nC9zD6g"
+PAN_SPEED_POINT_APP_ID = "huodong20260401"
+PAN_SPEED_UPLOAD_URLS = ("https://tjupload.pan.wo.cn/openapi/client/upload2C", "https://gxnewupload.pan.wo.cn/openapi/client/upload2C")
+PAN_SPEED_FALLBACK_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn6mQAAAABJRU5ErkJggg=="
+
+# ====================  Utils  ====================
+_print_lock = asyncio.Lock()
+get_display_width = lambda s: sum(2 if ord(c) > 127 else 1 for c in s)
+pad_to_width = lambda s, w: s + " " * max(0, w - get_display_width(s))
+
+class Logger:
+    def __init__(self, prefix=""): self.prefix = prefix
+    def log(self, message, notify=False):
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] [{self.prefix}] {message}" if self.prefix else f"[{ts}] {message}", flush=True)
+    async def log_async(self, message, notify=False):
+        async with _print_lock: self.log(message, notify)
+
+class HttpClient:
+    def __init__(self, logger_instance):
+        self.logger, self.headers, self.cookies, self.timeout, self.retries = logger_instance, {"User-Agent": USER_AGENT(APP_VERSION), "Connection": "keep-alive"}, httpx.Cookies(), 50.0, 3
+        self.client = None
+        self.client_limits = httpx.Limits(max_keepalive_connections=20, max_connections=20)
+
+    async def _get_client(self):
+        if not self.client or self.client.is_closed:
+            self.client = httpx.AsyncClient(cookies=self.cookies, http2=False, follow_redirects=False, timeout=self.timeout, verify=False, limits=self.client_limits)
+        return self.client
+
+    async def close(self):
+        if self.client and not self.client.is_closed:
+            await self.client.aclose()
+        self.client = None
+
+    async def request(self, method, url, **kwargs):
+        headers = {**self.headers, **kwargs.pop("headers", {})}
+        cookies = kwargs.pop("cookies", self.cookies)
+        timeout = kwargs.pop("timeout", self.timeout)
+        retries = kwargs.pop("retries", self.retries)
+        use_temp_client = cookies is not self.cookies
+        for attempt in range(retries):
+            try:
+                if use_temp_client:
+                    async with httpx.AsyncClient(cookies=cookies, http2=False, follow_redirects=False, timeout=self.timeout, verify=False, limits=self.client_limits) as client:
+                        response = await client.request(method, url, headers=headers, timeout=timeout, **kwargs)
+                else:
+                    client = await self._get_client()
+                    response = await client.request(method, url, headers=headers, timeout=timeout, **kwargs)
+                    client.cookies.update(response.cookies)
+                self.cookies.update(response.cookies)
+                text = response.text
+                if text.strip().startswith(("{", "[")):
+                    try: result = response.json()
+                    except Exception: result = text
+                else: result = text
+                return {"statusCode": response.status_code, "headers": response.headers, "result": result}
+            except Exception:
+                if attempt + 1 < retries: await asyncio.sleep(1 + attempt * 2)
+        return {"statusCode": -1, "headers": {}, "result": None}
+    get = lambda self, url, **kw: self.request("GET", url, **kw)
+    post = lambda self, url, **kw: self.request("POST", url, **kw)
+
+class MarketEncrypt:
+    KEY = "AB1BLc3Ak1yvClgT"
+
+    @classmethod
+    def decrypt(cls, text):
+        if not text or isinstance(text, dict): return text
+        try: return json.loads(text)
+        except: pass
+        try:
+            cipher = AES.new(cls.KEY.encode(), AES.MODE_ECB)
+            return json.loads(unpad(cipher.decrypt(base64.b64decode(text)), AES.block_size).decode())
+        except: return text
+
+    @classmethod
+    def encrypt(cls, data):
+        if not data: return data
+        try:
+            text = json.dumps(data, separators=(",", ":")) if isinstance(data, (dict, list)) else str(data)
+            cipher = AES.new(cls.KEY.encode(), AES.MODE_ECB)
+            return base64.b64encode(cipher.encrypt(pad(text.encode(), AES.block_size))).decode()
+        except: return data
+
+
+def aes_cbc_base64_encrypt(data, key, iv):
+    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False) if isinstance(data, (dict, list)) else str(data)
+    aes_key = (key or "")[:16].encode("utf-8")
+    cipher = AES.new(aes_key, AES.MODE_CBC, iv.encode("utf-8"))
+    return base64.b64encode(cipher.encrypt(pad(text.encode("utf-8"), AES.block_size))).decode()
+
+
+def aes_cbc_base64_decrypt(data, key, iv):
+    aes_key = (key or "")[:16].encode("utf-8")
+    cipher = AES.new(aes_key, AES.MODE_CBC, iv.encode("utf-8"))
+    return unpad(cipher.decrypt(base64.b64decode(data)), AES.block_size).decode("utf-8")
+
+class MarketRaffleState:
+    def __init__(self): self.checked, self.has_prizes, self.prizes, self.lock = False, False, [], asyncio.Lock()
+    async def check_prizes(self, http_client, market_token, headers=None):
+        async with self.lock:
+            if self.checked: return self.has_prizes
+            print("\n" + "=" * 70 + "\n权益超市奖品池查询\n" + "=" * 70)
+            try:
+                headers = headers or {"Authorization": f"Bearer {market_token}"}
+                res = await http_client.request("POST", "https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/prizeList?id=12", headers=headers, json={})
+                result = res["result"]
+                if result and result.get("code") == 200 and isinstance(result.get("data"), list):
+                    self.prizes = result["data"]
+                    available_prizes = [p for p in self.prizes if (lambda p: float(p.get("probability", 0)) > 0 or float(p.get("probabilityVip", 0)) > 0 or float(p.get("newVipProbability", 0)) > 0)(p)]
+                    print(f"今日奖池共 {len(available_prizes)} 个奖品:\n")
+                    print(f"{pad_to_width('奖品名称', 36)} {'普通':>6} {'VIP':>6} {'新会员':>6} {'Limit':>6}")
+                    print("-" * 70)
+                    for prize in available_prizes:
+                        name = prize.get("name", "未知")
+                        if get_display_width(name) > 34:
+                            while get_display_width(name) > 32: name = name[:-1]
+                            name = name + ".."
+                        prob, prob_vip, prob_new = float(prize.get("probability", 0)), float(prize.get("probabilityVip", 0)), float(prize.get("newVipProbability", 0))
+                        daily_limit = int(prize.get("dailyPrizeLimit", 0))
+                        print(f"{pad_to_width(name, 36)} {prob * 100:>5.0f}% {prob_vip * 100:>5.0f}% {prob_new * 100:>5.0f}% {daily_limit:>6}")
+                    print("=" * 70 + "\n")
+                    self.has_prizes = len(available_prizes) > 0
+                else: print(f"奖品池查询失败: {result}")
+            except Exception as e: print(f"奖品池查询异常: {str(e)}")
+            self.checked = True
+            return self.has_prizes
+
+market_raffle_state = MarketRaffleState()
+
+class CustomUserService:
+    def __init__(self, cookie, index=1):
+        self.cookie, self.index = cookie, index
+        self.logger = Logger(prefix=f"账号{index}")
+        self.http = HttpClient(self.logger)
+        self.valid, self.mobile, self.province = False, "", ""
+        self.app_version, self.token_online, self.app_id = APP_VERSION, cookie.strip(), APP_ID
+        self.unicom_token_id = "".join(random.choices(string.ascii_letters + string.digits, k=32))
+        self.token_id_cookie = "chinaunicom-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=32))
+        self.sdkuuid = self.unicom_token_id
+        self.random_string = lambda n, c=string.ascii_letters + string.digits: "".join(random.choices(c, k=n))
+        for name, val in [("TOKENID_COOKIE", self.token_id_cookie), ("UNICOM_TOKENID", self.unicom_token_id), ("sdkuuid", self.sdkuuid)]:
+            self.http.cookies.set(name, val, domain=".10010.com")
+        self.rpt_id = self.market_token = self.market_login_id = self.market_rn_str = self.xj_token = self.wocare_token = self.wocare_sid = self.ecs_token = ""
+        self.session_id = self.token_id = ""
+        self.xj_comm_high_flag = ""
+        self.market_privilege_cache = None
+        self.sec_old_points = None
+        self.sec_ticket1 = self.sec_token = self.sec_ticket = self.sec_jea_id = self.sec_secret_key = ""
+        self.initial_telephone_amount = 0.0
+
+    get_bizchannelinfo = lambda self: json.dumps({"bizChannelCode": "225", "disriBiz": "party", "unionSessionId": "", "stType": "", "stDesmobile": "", "source": "", "rptId": self.rpt_id, "ticket": "", "tongdunTokenId": self.token_id_cookie, "xindunTokenId": self.sdkuuid})
+    get_epay_authinfo = lambda self: json.dumps({"mobile": "", "sessionId": getattr(self, "session_id", ""), "tokenId": getattr(self, "token_id", ""), "userId": ""})
+
+    @async_task("登录")
+    async def online(self):
+        data = {"token_online": self.token_online, "reqtime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "appId": self.app_id, "version": self.app_version, "step": "bindlist", "isFirstInstall": 0, "deviceModel": "iPhone14,6", "deviceOS": "16.6", "deviceBrand": "iPhone", "uniqueIdentifier": "ios" + self.random_string(32, "0123456789abcdef"), "simOperator": "--,--,65535,65535,--@--,--,65535,65535,--", "voipToken": "citc-default-token-do-not-push"}
+        res = await self.http.post("https://m.client.10010.com/mobileService/onLine.htm", data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        if (result := res["result"]) and str(result.get("code")) == "0":
+            self.valid, self.mobile, self.ecs_token, self.province = True, result.get("desmobile", ""), result.get("ecs_token", ""), (result.get("list") or [{}])[0].get("proName", "")
+            masked = f"{self.mobile[:3]}****{self.mobile[-4:]}" if len(self.mobile) >= 11 else self.mobile
+            self.logger.log(f"登录成功: {masked} (归属地: {self.province})")
+            return True
+        self.logger.log(f"登录失败: {result}")
+        return False
+
+    @async_task("获取ticket")
+    async def open_plat_line_new(self, url, headers=None):
+        res = await self.http.get("https://m.client.10010.com/mobileService/openPlatform/openPlatLineNew.htm", params={"to_url": url}, headers=headers or {})
+        if location := (res["headers"].get("location") or res["headers"].get("Location")):
+            qs = parse_qs(urlparse(location).query)
+            return {"ticket": qs.get("ticket", [""])[0], "type": qs.get("type", ["02"])[0], "loc": location}
+        self.logger.log("获取ticket失败: 无location")
+        return {"ticket": "", "type": "", "loc": ""}
+
+    def pan_speed_base_headers(self):
+        return {"User-Agent": PAN_SPEED_USER_AGENT}
+
+    def pan_speed_activity_headers(self, pan_token, referer, content_type: str | None = "application/json"):
+        headers = {
+            **self.pan_speed_base_headers(),
+            "Origin": "https://panservice.mail.wo.cn",
+            "Referer": referer,
+            "accesstoken": pan_token,
+            "X-YP-Access-Token": pan_token,
+            "token": pan_token,
+            "Access-Token": pan_token,
+            "clientId": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "client-id": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "X-YP-Client-Id": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "Client-Id": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "app-type": "unicom",
+            "source-type": "woapi",
+            "X-YP-Open-Version": "v1.0",
+        }
+        if content_type:
+            headers["Content-Type"] = content_type
+        return headers
+
+    def pan_speed_dispatcher_payload(self, key, body, channel, encrypt_key=None):
+        res_time = int(time.time() * 1000)
+        req_seq = random.randint(100000, 189998)
+        version = ""
+        sign = hashlib.md5(f"{key}{res_time}{req_seq}{channel}{version}".encode()).hexdigest()
+        request_body = dict(body)
+        if encrypt_key:
+            request_body = {"param": aes_cbc_base64_encrypt(request_body, encrypt_key, PAN_SPEED_AES_IV), "clientId": PAN_SPEED_CLOUD_CLIENT_ID, "secret": True}
+        return {"header": {"key": key, "resTime": res_time, "reqSeq": req_seq, "channel": channel, "version": version, "sign": sign}, "body": request_body}
+
+    def pan_speed_build_target_url(self, pan_token, touchpoint=PAN_SPEED_TOUCHPOINT):
+        return f"https://panservice.mail.wo.cn/h5/mobile/speed/start?activityId={PAN_SPEED_ACTIVITY_ID}&touchpoint={touchpoint}&clientid={PAN_SPEED_CLOUD_CLIENT_ID}&token={pan_token}"
+
+    def pan_speed_build_fallback_referer(self, pan_token, touchpoint=PAN_SPEED_TOUCHPOINT, ticket=""):
+        params = {
+            "activityId": PAN_SPEED_ACTIVITY_ID,
+            "type": "02",
+            "ticket": ticket,
+            "version": PAN_SPEED_APP_VERSION,
+            "timestamp": datetime.now().strftime("%Y%m%d%H%M%S"),
+            "desmobile": self.mobile,
+            "num": 0,
+            "postage": self.random_string(32, "0123456789abcdef"),
+            "touchpoint": touchpoint,
+            "clientid": PAN_SPEED_CLOUD_CLIENT_ID,
+            "token": pan_token,
+            "userNumber": self.mobile,
+        }
+        return f"https://panservice.mail.wo.cn/h5/mobile/speed/start?{urlencode(params)}"
+
+    @async_task_silent
+    async def pan_speed_get_ticket_by_native(self):
+        headers = self.pan_speed_base_headers()
+        res = await self.http.get("https://m.client.10010.com/edop_ng/getTicketByNative", params={"token": self.ecs_token, "appId": PAN_SPEED_OPEN_APP_ID}, headers=headers)
+        if isinstance((result := res["result"]), dict) and result.get("rsp_code") == "0000":
+            return result.get("ticket", "")
+        self.logger.log(f"联通云盘测速争霸获取native ticket失败: {result}")
+        return ""
+
+    @async_task_silent
+    async def pan_speed_auto_login(self, ticket):
+        headers = {**self.pan_speed_base_headers(), "Origin": "null", "Content-Type": "application/json", "accesstoken": ""}
+        payload = self.pan_speed_dispatcher_payload("HandheldHallAutoLoginV2", {"ticket": ticket, "clientId": PAN_SPEED_CLOUD_CLIENT_ID}, "wohome")
+        res = await self.http.post("https://panservice.mail.wo.cn/wohome/dispatcher", json=payload, headers=headers)
+        if isinstance((result := res["result"]), dict):
+            rsp = result.get("RSP", {})
+            data = rsp.get("DATA", {})
+            if rsp.get("RSP_CODE") == "0000" and data.get("token"):
+                return data
+        self.logger.log(f"联通云盘测速争霸云盘登录失败: {result}")
+        return None
+
+    @async_task_silent
+    async def pan_speed_open_activity(self, pan_token):
+        target_url = self.pan_speed_build_target_url(pan_token)
+        ticket_info = await self.open_plat_line_new(target_url, headers=self.pan_speed_base_headers())
+        referer = ticket_info.get("loc") or self.pan_speed_build_fallback_referer(pan_token, ticket=ticket_info.get("ticket", ""))
+        qs = parse_qs(urlparse(referer).query)
+        return {"referer": referer, "ticket": qs.get("ticket", [ticket_info.get("ticket", "")])[0], "touchpoint": qs.get("touchpoint", [PAN_SPEED_TOUCHPOINT])[0]}
+
+    @async_task_silent
+    async def pan_speed_query_user(self, pan_token, referer):
+        payload = self.pan_speed_dispatcher_payload("AppQueryUser", {"accessToken": pan_token}, "api-user", encrypt_key=PAN_SPEED_DISPATCHER_KEY)
+        res = await self.http.post("https://panservice.mail.wo.cn/api-user/dispatcher", json=payload, headers=self.pan_speed_activity_headers(pan_token, referer))
+        if not isinstance((result := res["result"]), dict):
+            return None
+        rsp = result.get("RSP", {})
+        if rsp.get("RSP_CODE") != "0000" or not rsp.get("DATA"):
+            return None
+        try:
+            return json.loads(aes_cbc_base64_decrypt(rsp["DATA"], PAN_SPEED_DISPATCHER_KEY, PAN_SPEED_AES_IV))
+        except Exception:
+            return None
+
+    @async_task_silent
+    async def pan_speed_activity_get(self, path, pan_token, referer, params=None):
+        res = await self.http.get(f"https://panservice.mail.wo.cn{path}", params=params or {}, headers=self.pan_speed_activity_headers(pan_token, referer, content_type=None))
+        return res["result"] if isinstance(res["result"], dict) else None
+
+    @async_task_silent
+    async def pan_speed_activity_post(self, path, pan_token, referer, body):
+        res = await self.http.post(f"https://panservice.mail.wo.cn{path}", json=body, headers=self.pan_speed_activity_headers(pan_token, referer))
+        return res["result"] if isinstance(res["result"], dict) else None
+
+    @async_task_silent
+    async def pan_speed_check_status(self, pan_token, referer):
+        result = await self.pan_speed_activity_get("/activity/checkActivityStatus", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+        return None if not result else (result.get("result") or {}).get("state")
+
+    @async_task_silent
+    async def pan_speed_get_task_info(self, pan_token, referer):
+        result = await self.pan_speed_activity_get("/activity/lottery/activityRateTaskInfo", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+        return None if not result else bool(result.get("result"))
+
+    @async_task_silent
+    async def pan_speed_get_lottery_times(self, pan_token, referer):
+        result = await self.pan_speed_activity_get("/activity/lottery/lottery-times", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+        if not result:
+            return None
+        try:
+            return int(result.get("result", 0) or 0)
+        except Exception:
+            return 0
+
+    @async_task_silent
+    async def pan_speed_activate(self, pan_token, referer):
+        result = await self.pan_speed_activity_post("/activity/task/activate", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+        return bool(result and (result.get("meta") or {}).get("code") == "200")
+
+    @async_task_silent
+    async def pan_speed_lottery(self, pan_token, referer):
+        return await self.pan_speed_activity_post("/activity/lottery", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+
+    @async_task_silent
+    async def pan_speed_trace_upload(self, fid, file_size, page_start_ms, trans_start_ms, trans_end_ms, touchpoint):
+        event = {
+            "ea": "upload_speed",
+            "ett": "click",
+            "cp": "ActivePage_ceszb_kqcs",
+            "ts": trans_end_ms,
+            "et": {
+                "start": page_start_ms,
+                "end": trans_end_ms,
+                "trans_start": trans_start_ms,
+                "trans_end": trans_end_ms,
+                "fid": fid,
+                "size": file_size,
+                "netWork": 2,
+                "appId": PAN_SPEED_POINT_APP_ID,
+                "touchpoint": touchpoint,
+            },
+        }
+        payload = {
+            "mp": self.mobile,
+            "uu": PAN_SPEED_USER_AGENT,
+            "ct": "H5",
+            "uts": int(time.time() * 1000),
+            "cl": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "el": [event],
+        }
+        encrypted = aes_cbc_base64_encrypt(payload, PAN_SPEED_POINT_KEY, PAN_SPEED_POINT_IV)
+        headers = {"Origin": "https://panservice.mail.wo.cn", "Referer": "https://panservice.mail.wo.cn/", "User-Agent": PAN_SPEED_USER_AGENT, "Content-Type": "text/plain;charset=UTF-8"}
+        for url in ("https://panservice.mail.wo.cn/point/v1", "https://panservice.mail.wo.cn:18090/point/v1"):
+            res = await self.http.post(url, content=encrypted, headers=headers)
+            if res["statusCode"] == 200 and "success" in str(res["result"]).lower():
+                return True
+        return False
+
+    @async_task_silent
+    async def pan_speed_upload_file(self, pan_token, referer, file_name, file_bytes, mime_type):
+        file_info = {"batchNo": datetime.now().strftime("%Y%m%d%H%M%S"), "fileName": file_name, "fileSize": len(file_bytes), "fileType": 1, "directoryId": "0", "spaceType": "0"}
+        form_data = {
+            "uniqueId": f"{int(time.time() * 1000)}_{random.random()}",
+            "accessToken": pan_token,
+            "psToken": "undefined",
+            "totalPart": "1",
+            "partSize": str(len(file_bytes)),
+            "partIndex": "1",
+            "channel": "wocloud",
+            "fileName": file_name,
+            "fileSize": str(len(file_bytes)),
+            "directoryId": "0",
+            "fileInfo": aes_cbc_base64_encrypt(file_info, pan_token, PAN_SPEED_AES_IV),
+        }
+        headers = {**self.pan_speed_base_headers(), "Origin": "https://panservice.mail.wo.cn", "Referer": referer, "accessToken": pan_token, "access-token": pan_token, "client_id": PAN_SPEED_CLOUD_CLIENT_ID}
+        last_error = None
+        for upload_url in PAN_SPEED_UPLOAD_URLS:
+            res = await self.http.post(upload_url, data=form_data, files={"file": (file_name, file_bytes, mime_type)}, headers=headers)
+            if isinstance((result := res["result"]), dict) and result.get("code") == "0000":
+                self.logger.log(f"联通云盘测速争霸上传成功: {file_name}")
+                return result
+            last_error = result
+        self.logger.log(f"联通云盘测速争霸上传失败[{file_name}]: {last_error}")
+        return None
+
+    @async_task_silent
+    async def pan_speed_upload_and_wait(self, pan_token, referer, touchpoint, file_name, file_bytes, mime_type, old_times, page_start_ms):
+        trans_start_ms = int(time.time() * 1000)
+        upload_result = await self.pan_speed_upload_file(pan_token, referer, file_name, file_bytes, mime_type)
+        trans_end_ms = int(time.time() * 1000)
+        if not upload_result:
+            return None
+        fid = ((upload_result.get("data") or {}).get("fid") or "")
+        if fid:
+            await self.pan_speed_trace_upload(fid, len(file_bytes), page_start_ms, trans_start_ms, trans_end_ms, touchpoint)
+        task_done, lottery_times = False, old_times
+        for _ in range(8):
+            await asyncio.sleep(3)
+            latest_times = await self.pan_speed_get_lottery_times(pan_token, referer)
+            latest_task = await self.pan_speed_get_task_info(pan_token, referer)
+            if latest_times is not None:
+                lottery_times = latest_times
+            if latest_task is not None:
+                task_done = latest_task
+            if task_done or (lottery_times is not None and lottery_times > old_times):
+                break
+        return {"task_done": task_done, "lottery_times": lottery_times, "upload": upload_result}
+
+    @async_task("联通云盘测速争霸")
+    async def pan_speed_task(self):
+        if not self.ecs_token:
+            return
+        native_ticket = await self.pan_speed_get_ticket_by_native()
+        if not native_ticket:
+            return
+        if not (login_data := await self.pan_speed_auto_login(native_ticket)):
+            return
+        pan_token = login_data.get("token", "")
+        if not pan_token:
+            self.logger.log("联通云盘测速争霸获取云盘token失败")
+            return
+        activity_ctx = await self.pan_speed_open_activity(pan_token)
+        if not activity_ctx:
+            self.logger.log("联通云盘测速争霸打开活动页失败")
+            return
+        referer, touchpoint = activity_ctx["referer"], activity_ctx["touchpoint"]
+        await self.pan_speed_query_user(pan_token, referer)
+        state = await self.pan_speed_check_status(pan_token, referer)
+        task_done = await self.pan_speed_get_task_info(pan_token, referer)
+        lottery_times = await self.pan_speed_get_lottery_times(pan_token, referer)
+        self.logger.log(f"联通云盘测速争霸: state={state}, 上传任务={'已完成' if task_done else '未完成'}, 抽奖次数={lottery_times if lottery_times is not None else '未知'}")
+        if state == 0:
+            if await self.pan_speed_activate(pan_token, referer):
+                self.logger.log("联通云盘测速争霸: 已激活活动")
+                await asyncio.sleep(1)
+        if not task_done:
+            page_start_ms = int(time.time() * 1000)
+            txt_bytes = f"speed-test {self.mobile} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n".encode()
+            result = await self.pan_speed_upload_and_wait(pan_token, referer, touchpoint, "speed-test.txt", txt_bytes, "text/plain", lottery_times or 0, page_start_ms)
+            task_done = result["task_done"] if result else False
+            lottery_times = result["lottery_times"] if result and result["lottery_times"] is not None else lottery_times
+            if not task_done and not (lottery_times and lottery_times > 0):
+                self.logger.log("联通云盘测速争霸: txt上传未到账，回退为极小png重试")
+                png_bytes = base64.b64decode(PAN_SPEED_FALLBACK_PNG)
+                result = await self.pan_speed_upload_and_wait(pan_token, referer, touchpoint, "speed-test.png", png_bytes, "image/png", lottery_times or 0, page_start_ms)
+                task_done = result["task_done"] if result else task_done
+                lottery_times = result["lottery_times"] if result and result["lottery_times"] is not None else lottery_times
+        if lottery_times is None:
+            lottery_times = await self.pan_speed_get_lottery_times(pan_token, referer) or 0
+        if task_done:
+            self.logger.log(f"联通云盘测速争霸: 上传任务已完成，当前抽奖次数 {lottery_times}")
+        elif lottery_times:
+            self.logger.log(f"联通云盘测速争霸: 已获得抽奖次数 {lottery_times}")
+        else:
+            self.logger.log("联通云盘测速争霸: 未拿到抽奖次数")
+            return
+        while lottery_times > 0:
+            result = await self.pan_speed_lottery(pan_token, referer)
+            prize_info = (result or {}).get("result") or {}
+            if (result or {}).get("meta", {}).get("code") == "200":
+                prize_name = prize_info.get("prizeName") or "谢谢参与"
+                self.logger.log(f"联通云盘测速争霸抽奖: {prize_name}", notify=True)
+                lottery_times = int(prize_info.get("lotteryTimes", max(lottery_times - 1, 0)) or 0)
+            else:
+                self.logger.log(f"联通云盘测速争霸抽奖失败: {result}")
+                break
+            if lottery_times <= 0:
+                latest_times = await self.pan_speed_get_lottery_times(pan_token, referer)
+                lottery_times = latest_times if latest_times is not None else 0
+            if lottery_times > 0:
+                await asyncio.sleep(1)
+
+    async def sign_task(self):
+        await self.sign_get_continuous()
+        await self.sign_get_telephone(is_initial=True)
+        await self.sign_task_center()
+        await self.sign_get_telephone(is_initial=False)
+        await self.sign_coupon_exchange()
+
+    @async_task("签到区查询话费红包")
+    async def sign_get_telephone(self, is_initial=False):
+        res = await self.http.post("https://act.10010.com/SigninApp/convert/getTelephone", data={}, headers={"Referer": "https://img.client.10010.com/"})
+        if (result := res["result"]) and str(result.get("status")) == "0000" and (data := result.get("data")):
+            telephone = data.get("telephone") or "0"
+            if telephone == "--": telephone = "0"
+            current = float(telephone)
+            if is_initial: self.initial_telephone_amount = current; return
+            increase = current - self.initial_telephone_amount
+            msg = f"签到区-话费红包: 总额 {current:.2f}元，本次增加 {increase:.2f}元"
+            needexp = data.get("needexpNumber") or "0"
+            if needexp == "--": needexp = "0"
+            if (need_exp := float(needexp)) > 0: msg += f",其中 {need_exp}元 将于 {data.get('month')}月底到期"
+            self.logger.log(msg, notify=True)
+        else: self.logger.log(f"签到区查询话费红包失败: {result.get('msg') if result else ''}")
+
+    @async_task("查询签到状态")
+    async def sign_get_continuous(self):
+        res = await self.http.get("https://activity.10010.com/sixPalaceGridTurntableLottery/signin/getContinuous", params={"taskId": "", "channel": "wode", "imei": "BB97982E-3F03-46D3-B904-819D626DF478"})
+        if (result := res["result"]) and str(result.get("code")) == "0000":
+            signed = result.get("data", {}).get("todayIsSignIn", "n") != "n"
+            self.logger.log(f"签到状态: {'已签到' if signed else '未签到'}")
+            if not signed: await asyncio.sleep(1); await self.sign_day_sign()
+        else: self.logger.log(f"查询签到状态失败: {result}")
+
+    @async_task("签到")
+    async def sign_day_sign(self):
+        res = await self.http.post("https://activity.10010.com/sixPalaceGridTurntableLottery/signin/daySign", data={})
+        if (result := res["result"]) and str(result.get("code")) == "0000":
+            data = result.get("data", {})
+            self.logger.log(f"签到成功: {data.get('statusDesc', '')} {data.get('redSignMessage', '')}", notify=True)
+        elif str(result.get("code")) == "0002" and "已经签到" in result.get("desc", ""): self.logger.log("签到成功: 今日已完成签到", notify=True)
+        else: self.logger.log(f"签到失败: {result}")
+
+    async def ttlxj_task(self):
+        self.rpt_id = ""
+        if (ticket_info := await self.open_plat_line_new("https://epay.10010.com/ci-mps-st-web/?webViewNavIsHidden=webViewNavIsHidden"))["ticket"]:
+            await self.ttlxj_authorize(ticket_info["ticket"], ticket_info["type"], ticket_info["loc"])
+
+    @async_task("天天领现金授权")
+    async def ttlxj_authorize(self, ticket, st_type, referer):
+        data = {"response_type": "rptid", "client_id": CLIENT_ID, "redirect_uri": "https://epay.10010.com/ci-mps-st-web/", "login_hint": {"credential_type": "st_ticket", "credential": ticket, "st_type": st_type, "force_logout": True, "source": "app_sjyyt"}, "device_info": {"token_id": f"chinaunicom-pro-{int(time.time() * 1000)}-{self.random_string(13)}", "trace_id": self.random_string(32)}}
+        res = await self.http.post("https://epay.10010.com/woauth2/v2/authorize", headers={"Origin": "https://epay.10010.com", "Referer": referer}, json=data)
+        if res["statusCode"] == 200: await self.ttlxj_auth_check()
+        else: self.logger.log(f"天天领现金授权失败: {res['result']}")
+
+    @async_task("天天领现金认证")
+    async def ttlxj_auth_check(self):
+        res = await self.http.post("https://epay.10010.com/ps-pafs-auth-front/v1/auth/check", headers={"bizchannelinfo": self.get_bizchannelinfo()})
+        result = res["result"]
+        if str(result.get("code")) == "0000":
+            auth = result.get("data", {}).get("authInfo", {})
+            self.session_id, self.token_id = auth.get("sessionId"), auth.get("tokenId")
+            await self.ttlxj_user_draw_info()
+            await self.ttlxj_query_available()
+        elif str(result.get("code")) == "2101000100": await self.ttlxj_login(result.get("data", {}).get("woauth_login_url"))
+        else: self.logger.log(f"天天领现金认证失败: {result}")
+
+    @async_task("天天领现金登录")
+    async def ttlxj_login(self, login_url):
+        res = await self.http.get(f"{login_url}https://epay.10010.com/ci-mcss-party-web/clockIn/?bizFrom=225&bizChannelCode=225&channelType=WDQB")
+        if location := (res["headers"].get("location") or res["headers"].get("Location")):
+            rpt_id = parse_qs(urlparse(location).query).get("rptid", [""])[0]
+            if rpt_id: self.rpt_id = rpt_id; await self.ttlxj_auth_check()
+            else: self.logger.log("天天领现金获取rptid失败")
+        else: self.logger.log("天天领现金获取rptid失败: 无location")
+
+    @async_task("天天领现金查询")
+    async def ttlxj_user_draw_info(self):
+        res = await self.http.post("https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/userDrawInfo", headers={"bizchannelinfo": self.get_bizchannelinfo(), "authinfo": self.get_epay_authinfo()})
+        if (result := res["result"]) and str(result.get("code")) == "0000":
+            data = result.get("data", {})
+            day_key = f"day{data.get('dayOfWeek')}"
+            not_clocked = data.get(day_key) == "1"
+            self.logger.log(f"天天领现金今天{'未' if not_clocked else '已'}打卡", notify=True)
+            if not_clocked:
+                draw_type = "C" if (datetime.now().weekday() + 1) % 7 == 0 else "B"
+                await self.ttlxj_unify_draw_new(draw_type)
+        else: self.logger.log(f"天天领现金查询失败: {result}")
+
+    @async_task("天天领现金打卡")
+    async def ttlxj_unify_draw_new(self, draw_type):
+        res = await self.http.post("https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/unifyDrawNew", headers={"bizchannelinfo": self.get_bizchannelinfo(), "authinfo": self.get_epay_authinfo()}, data={"drawType": draw_type, "bizFrom": "225", "activityId": "TTLXJ20210330"})
+        if (result := res["result"]) and str(result.get("code")) == "0000" and str(result.get("data", {}).get("returnCode")) == "0":
+            amount = result["data"].get("amount")
+            msg = result["data"].get("awardTipContent", "").replace("xx", str(amount))
+            self.logger.log(f"天天领现金打卡: {msg}", notify=True)
+        else: self.logger.log(f"天天领现金打卡失败: {result}")
+
+    @async_task("天天领现金查询余额")
+    async def ttlxj_query_available(self):
+        res = await self.http.post("https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/queryAvailable", headers={"bizchannelinfo": self.get_bizchannelinfo(), "authinfo": self.get_epay_authinfo()})
+        if (result := res["result"]) and str(result.get("code")) == "0000" and str(result.get("data", {}).get("returnCode")) == "0":
+            self.logger.log(f"可用立减金: {float(result['data'].get('availableAmount', 0)) / 100:.2f}元", notify=True)
+        else: self.logger.log(f"天天领现金查询余额失败: {result}")
+
+    async def ltzf_task(self):
+        target_url = f"https://wocare.unisk.cn/mbh/getToken?channelType={WOCARE_CHANNEL_TYPE}&homePage=home&duanlianjieabc=qAz2m"
+        if not (ticket_info := await self.open_plat_line_new(target_url))["ticket"]: return
+        if not await self.wocare_get_token(ticket_info["ticket"]): return
+        for task in [{"name": "星座配对", "id": 2}, {"name": "大转盘", "id": 3}, {"name": "盲盒抽奖", "id": 4}]: await self.wocare_get_draw_task(task); await self.wocare_load_init(task)
+
+    def _wostore_cloud_referer(self, cp_token=""):
+        base = f"https://uphone.wostore.cn/h5/lt/SpringRenewal?ch={WOSTORE_CLOUD_CHANNEL_ID}&system=h5"
+        return f"{base}&cpToken={cp_token}&channelId={WOSTORE_CLOUD_CHANNEL_ID}" if cp_token else f"{base}&channelId={WOSTORE_CLOUD_CHANNEL_ID}"
+
+    @async_task("云手机")
+    async def wostore_cloud_task(self):
+        if not (ticket_info := await self.open_plat_line_new(WOSTORE_CLOUD_DIALOG_URL))["ticket"]: return
+        if not (tokens := await self.wostore_cloud_login(ticket_info["ticket"])): return
+        cp_token, user_token = tokens
+        await self.wostore_cloud_points_sign(user_token)
+        await asyncio.sleep(1)
+        task_data = await self.wostore_cloud_task_list(user_token, cp_token)
+        if not task_data: return
+        points_task = next((task for task in task_data.get("taskList", []) if task.get("taskCode") == WOSTORE_CLOUD_POINTS_TASK_CODE), None)
+        unclaimed_tasks = [task for task in task_data.get("taskList", []) if task.get("status") == "UNCLAIMED" and task.get("taskCode")]
+        claimed_hidden_task = bool(unclaimed_tasks)
+        if not unclaimed_tasks and int(task_data.get("rafflesLeftCount", 0) or 0) < 1 and points_task and points_task.get("status") == "OBTAINED":
+            self.logger.log("云手机: 今日已抽奖")
+            return
+        for task in unclaimed_tasks:
+            await asyncio.sleep(1)
+            await self.wostore_cloud_get_chance(user_token, cp_token, task.get("taskCode", ""))
+        await asyncio.sleep(1)
+        if not (task_data := await self.wostore_cloud_task_list(user_token, cp_token)): return
+        points_task = next((task for task in task_data.get("taskList", []) if task.get("taskCode") == WOSTORE_CLOUD_POINTS_TASK_CODE), None)
+        if not (raffles_left := int(task_data.get("rafflesLeftCount", 0) or 0)):
+            if points_task and points_task.get("status") == "OBTAINED": self.logger.log("云手机: 今日已抽奖")
+            elif claimed_hidden_task: self.logger.log("云手机: 已领取任务但无抽奖次数")
+            return
+        for _ in range(raffles_left):
+            await asyncio.sleep(1)
+            await self.wostore_cloud_draw(user_token, cp_token)
+
+    @async_task_silent
+    async def wostore_cloud_login(self, ticket):
+        referer = f"{WOSTORE_CLOUD_DIALOG_URL}&ticket={ticket}"
+        data = {"cpId": WOSTORE_CLOUD_CP_ID, "channelId": WOSTORE_CLOUD_CHANNEL_ID, "ticket": ticket, "env": "prod", "transId": f"S2ndpage1235+开福袋！+F1+CJDD00D0001+{self.app_version}", "qkActId": None}
+        res = await self.http.post("https://member.zlhz.wostore.cn/wcy_member/yunPhone/h5Awake/businessHall", json=data, headers={"Host": "member.zlhz.wostore.cn", "Origin": "https://h5forphone.wostore.cn", "Referer": referer})
+        if not isinstance((result := res["result"]), dict) or result.get("code") != "0":
+            self.logger.log(f"云手机获取cpToken失败: {result}")
+            return None
+        redirect_url = result.get("data", {}).get("url", "")
+        query = parse_qs(urlparse(redirect_url).query)
+        cp_token = (query.get("token") or query.get("cpToken") or [""])[0]
+        if not cp_token:
+            self.logger.log("云手机获取cpToken失败: 跳转链接中无token")
+            return None
+        await asyncio.sleep(1)
+        login_headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": self._wostore_cloud_referer(cp_token), "X-USR-TOKEN": cp_token}
+        login_data = {"identityType": "cloudPhoneLogin", "code": cp_token, "channelId": WOSTORE_CLOUD_CHANNEL_ID, "activityId": WOSTORE_CLOUD_ACTIVITY_CODE, "device": "device"}
+        res2 = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/login", json=login_data, headers=login_headers)
+        if isinstance((result2 := res2["result"]), dict) and result2.get("code") == 200 and (user_token := result2.get("data", {}).get("user_token")):
+            return cp_token, user_token
+        self.logger.log(f"云手机登录失败: {result2}")
+        return None
+
+    @async_task_silent
+    async def wostore_cloud_points_sign(self, user_token):
+        headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": "https://uphone.wostore.cn/h5/lt/points", "X-USR-TOKEN": user_token}
+        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/points/v1/sign", json={"activityCode": WOSTORE_CLOUD_POINTS_SIGN_CODE}, headers=headers)
+        if isinstance((result := res["result"]), dict) and result.get("code") in [200, 10054]: return True
+        if isinstance(result, dict) and "已签到" in str(result.get("msg", "")): return True
+        return False
+
+    @async_task_silent
+    async def wostore_cloud_task_list(self, user_token, cp_token):
+        headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": self._wostore_cloud_referer(cp_token), "X-USR-TOKEN": user_token}
+        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/task/list", json={"activityCode": WOSTORE_CLOUD_ACTIVITY_CODE}, headers=headers)
+        if isinstance((result := res["result"]), dict) and result.get("code") == 200: return result
+        return None
+
+    @async_task_silent
+    async def wostore_cloud_get_chance(self, user_token, cp_token, task_code):
+        headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": self._wostore_cloud_referer(cp_token), "X-USR-TOKEN": user_token}
+        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/task/raffle/get", json={"activityCode": WOSTORE_CLOUD_ACTIVITY_CODE, "taskCode": task_code}, headers=headers)
+        return bool(isinstance((result := res["result"]), dict) and result.get("code") == 200)
+
+    @async_task("云手机抽奖")
+    async def wostore_cloud_draw(self, user_token, cp_token):
+        headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": self._wostore_cloud_referer(cp_token), "X-USR-TOKEN": user_token}
+        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/lottery", json={"activityCode": WOSTORE_CLOUD_ACTIVITY_CODE}, headers=headers)
+        if isinstance((result := res["result"]), dict) and result.get("code") == 200:
+            self.logger.log(f"云手机抽奖成功: {result.get('prizeName', result.get('msg', '成功'))}", notify=True)
+        elif isinstance(result, dict) and result.get("msg"):
+            self.logger.log(f"云手机抽奖失败: {result.get('msg')}")
+        else: self.logger.log(f"云手机抽奖失败: {result}")
+
+    @async_task("联通祝福获取sid")
+    async def wocare_get_token(self, ticket):
+        params = {k: v for k, v in [("channelType", WOCARE_CHANNEL_TYPE), ("type", "02"), ("ticket", ticket), ("version", APP_VERSION), ("timestamp", datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]), ("desmobile", self.mobile), ("num", 0), ("postage", self.random_string(32)), ("homePage", "home"), ("duanlianjieabc", "qAz2m"), ("userNumber", self.mobile)]}
+        res = await self.http.get("https://wocare.unisk.cn/mbh/getToken", params=params)
+        if res["statusCode"] == 302 and (loc := res["headers"].get("location") or res["headers"].get("Location")):
+            sid = parse_qs(urlparse(loc).query).get("sid", [""])[0]
+            if sid: self.wocare_sid = sid; return await self.wocare_loginmbh()
+        self.logger.log("联通祝福获取sid失败"); return False
+
+    @async_task("联通祝福登录")
+    async def wocare_loginmbh(self):
+        res = await self.wocare_api("loginmbh", {"sid": self.wocare_sid, "channelType": WOCARE_CHANNEL_TYPE, "apiCode": "loginmbh"})
+        if (result := res["result"]) and str(result.get("resultCode")) == "0000":
+            token = result.get("data", {}).get("token")
+            if token:
+                self.wocare_token = token
+                return True
+            self.logger.log(f"联通祝福登录成功但无token: {result}")
+        else: self.logger.log(f"联通祝福登录失败: {result}")
+        return False
+
+    def get_wocare_body(self, api_code, data):
+        ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
+        body = {"version": WOCARE_VERSION, "apiCode": api_code, "channelId": WOCARE_CHANNEL_ID, "transactionId": ts + self.random_string(6, string.digits), "timeStamp": ts, "messageContent": base64.b64encode(json.dumps(data, separators=(",", ":")).encode()).decode()}
+        sign_str = "&".join(f"{k}={body[k]}" for k in sorted(body)) + f"&sign={WOCARE_SIGN_KEY}"
+        body["sign"] = hashlib.md5(sign_str.encode()).hexdigest()
+        return body
+
+    async def wocare_api(self, api_code, data):
+        try:
+            res = await self.http.post(f"https://wocare.unisk.cn/api/v1/{api_code}", data=self.get_wocare_body(api_code, data))
+            if (result := res["result"]) and (msg := result.get("messageContent")):
+                try:
+                    import re
+                    msg_clean = re.sub(r"[^a-zA-Z0-9+/=\-_]", "", msg).replace("-", "+").replace("_", "/")
+                    if len(msg_clean) % 4:
+                        msg_clean += "=" * (4 - len(msg_clean) % 4)
+                    parsed = json.loads(base64.b64decode(msg_clean).decode())
+                    result["data"] = parsed.get("data", parsed)
+                    if parsed.get("resultMsg"): result["resultMsg"] = parsed["resultMsg"]
+                except: pass
+            return res
+        except Exception as e: self.logger.log(f"联通祝福API异常: {e}"); return {"result": {}}
+
+    @async_task("联通祝福查询任务")
+    async def wocare_get_draw_task(self, task_info):
+        res = await self.wocare_api("getDrawTask", {"token": self.wocare_token, "channelType": WOCARE_CHANNEL_TYPE, "type": task_info["id"], "apiCode": "getDrawTask"})
+        if (result := res["result"]) and str(result.get("resultCode")) == "0000":
+            for task in result.get("data", {}).get("taskList", []):
+                if str(task.get("taskStatus")) == "0": await self.wocare_complete_task(task_info, task)
+        else: self.logger.log(f"联通祝福[{task_info['name']}]查询任务失败: {result}")
+
+    @async_task("联通祝福完成任务")
+    async def wocare_complete_task(self, task_info, task, step="1"):
+        action = "领取任务" if step == "1" else "完成任务"
+        res = await self.wocare_api("completeTask", {"token": self.wocare_token, "channelType": WOCARE_CHANNEL_TYPE, "task": task["id"], "taskStep": step, "type": task_info["id"], "apiCode": "completeTask"})
+        if str(res["result"].get("resultCode")) == "0000":
+            if step == "1": await self.wocare_complete_task(task_info, task, "4")
+        else: self.logger.log(f"联通祝福[{task_info['name']}]{action}失败: {res['result']}")
+
+    @async_task("联通祝福查询活动")
+    async def wocare_load_init(self, task_info):
+        res = await self.wocare_api("loadInit", {"token": self.wocare_token, "channelType": WOCARE_CHANNEL_TYPE, "type": task_info["id"], "apiCode": "loadInit"})
+        if (result := res["result"]) and str(result.get("resultCode")) == "0000":
+            data = result.get("data", {})
+            group_id = data.get("zActiveModuleGroupId")
+            count = {2: 1 if not data.get("data", {}).get("isPartake") else 0, 3: int(data.get("raffleCountValue", 0)), 4: int(data.get("mhRaffleCountValue", 0))}.get(task_info["id"], 0)
+            for _ in range(count): await asyncio.sleep(2); await self.wocare_luck_draw(task_info, group_id)
+        else: self.logger.log(f"联通祝福[{task_info['name']}]查询活动失败: {result}")
+
+    @async_task("联通祝福抽奖")
+    async def wocare_luck_draw(self, task_info, group_id):
+        res = await self.wocare_api("luckDraw", {"token": self.wocare_token, "channelType": WOCARE_CHANNEL_TYPE, "zActiveModuleGroupId": group_id, "type": task_info["id"], "apiCode": "luckDraw"})
+        if (result := res["result"]) and str(result.get("resultCode")) == "0000":
+            data = result.get("data", {}).get("data", {})
+            prize = data.get("prize", {})
+            prize_name = prize.get("prizeName")
+            prize_desc = prize.get("prizeDesc")
+            if prize_name and prize_name != "None":
+                self.logger.log(f"联通祝福[{task_info['name']}]抽奖: {prize_name} [{prize_desc}]", notify=True)
+        else: self.logger.log(f"联通祝福[{task_info['name']}]抽奖失败: {result}")
+
+    async def market_task(self):
+        if not await self.market_login(): return
+        await self.market_privilege_task()
+        await self.market_share_task()
+        await self.market_watering_task()
+        await self.market_raffle_task()
+
+    @async_task("权益超市登录")
+    async def market_login(self):
+        if not (ticket_info := await self.open_plat_line_new("https://contact.bol.wo.cn/"))["ticket"]: return False
+        res = await self.http.post(f"https://backward.bol.wo.cn/prod-api/auth/marketUnicomLogin?ticket={ticket_info['ticket']}&channel=unicomTab", headers={"Content-Type": "application/json"}, json={})
+        if (result := res["result"]) and result.get("code") == 200:
+            self.market_token = result.get("data", {}).get("token")
+            try:
+                payload = self.market_token.split(".")[1]
+                padding = 4 - len(payload) % 4
+                if padding < 4: payload += "=" * padding
+                jwt_payload = json.loads(base64.urlsafe_b64decode(payload).decode())
+                self.market_login_id = jwt_payload.get("loginId", "")
+                self.market_rn_str = jwt_payload.get("rnStr", "")
+            except:
+                self.market_login_id = self.market_rn_str = ""
+            self.logger.log("权益超市登录成功")
+            return True
+        self.logger.log(f"权益超市登录失败: {result}")
+        return False
+
+    def _get_market_headers(self, body_str="{}", query_params=""):
+        if not self.market_token: return {}
+        timestamp = str(int(time.time() * 1000))
+        nonce = str(uuid.uuid4())
+        signature = self._generate_market_signature(timestamp, nonce, body_str, query_params)
+        return {"Authorization": f"Bearer {self.market_token}", "X-User-Id": self.market_login_id, "X-Timestamp": timestamp, "X-Nonce": nonce, "X-Signature": signature, "Content-Type": "application/json"}
+
+    def _generate_market_signature(self, timestamp, nonce, body_str, query_params):
+        secret_str = f"al:ak:{self.market_login_id}"
+        secret = hashlib.md5(secret_str.encode()).hexdigest()
+        data = f"{self.market_login_id}{secret}{nonce}{query_params}{body_str}"
+        return base64.b64encode(hmac.new(secret.encode(), data.encode(), hashlib.sha256).digest()).decode()
+
+    @async_task("分享小红书任务")
+    async def market_share_task(self):
+        res = await self.http.get("https://backward.bol.wo.cn/prod-api/promotion/activityTask/getAllActivityTasks?activityId=12", headers={"Authorization": f"Bearer {self.market_token}"})
+        if (not (result := MarketEncrypt.decrypt(res["result"])) or result.get("code") != 200): return self.logger.log(f"获取权益超市任务列表失败: {result}")
+        tasks = result.get("data", {}).get("activityTaskUserDetailVOList", [])
+        if not (share_task := next((t for t in tasks if t.get("taskType") == 14), None)): return
+        if share_task.get("status") == 1 or share_task.get("triggeredTime", 0) >= share_task.get("triggerTime", 1): return
+        if not (param1 := share_task.get("param1")): return self.logger.log("分享小红书任务 param1 为空")
+        check_res = await self.http.post(f"https://backward.bol.wo.cn/prod-api/promotion/activityTaskShare/checkShare?checkKey={param1}", headers={"Authorization": f"Bearer {self.market_token}", "Origin": "https://contact.bol.wo.cn", "Referer": "https://contact.bol.wo.cn/", "Content-Length": "0"}, data="")
+        if (not (check_result := MarketEncrypt.decrypt(check_res["result"])) or check_result.get("code") != 200): self.logger.log(f"分享小红书任务失败: {check_result}")
+
+    @async_task("权益超市浇花任务")
+    async def market_watering_task(self):
+        res = await self.http.get("https://backward.bol.wo.cn/prod-api/promotion/activityTask/getMultiCycleProcess?activityId=13", headers={"Authorization": f"Bearer {self.market_token}"})
+        if (result := res["result"]) and result.get("code") == 200:
+            triggered, total = int(result.get("data", {}).get("triggeredTime", 0)), int(result.get("data", {}).get("triggerTime", 1))
+            self.logger.log(f"浇花状态: {triggered}/{total}")
+            if triggered < total: await self.market_watering()
+            else: self.logger.log("浇花任务已全部完成")
+        else: self.logger.log(f"获取浇花状态失败: {result}")
+
+    @async_task("权益超市浇花")
+    async def market_watering(self):
+        ts = str(int(time.time() * 1000))
+        xbsosjl = "Y1mN8fNYktY0"
+        query = f"xbsosjl={xbsosjl}&timeVerRan={ts}&diceid={self.market_login_id}"
+        sign_str = f"td:433:tp{xbsosjl}td:334:et{self.market_login_id}td:334:et{ts}td:334:et"
+        signature = base64.b64encode(hmac.new(self.market_login_id.encode("utf-8"), sign_str.encode("utf-8"), hashlib.sha256).digest()).decode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {self.market_token}",
+            "X-Signature": signature,
+            "Content-Type": "application/json",
+            "Origin": "https://contact.bol.wo.cn",
+            "Referer": "https://contact.bol.wo.cn/"
+        }
+        res = await self.http.post(f"https://backward.bol.wo.cn/prod-api/promotion/activityTaskShare/checkWatering?{query}", headers=headers, json={})
+        if (result := res["result"]) and result.get("code") == 200: self.logger.log("权益超市浇花成功", notify=True)
+        else: self.logger.log(f"权益超市浇花失败: {result.get('msg', result)}")
+
+    @async_task("权益超市人机验证")
+    async def market_validate_captcha(self):
+        res = await self.http.post("https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/validateCaptcha?id=12", headers={"Authorization": f"Bearer {self.market_token}"}, data="")
+        if (result := res["result"]) and result.get("code") == 200: self.logger.log("权益超市: 人机验证通过，继续抽奖"); return await self.market_raffle()
+        self.logger.log(f"权益超市: 人机验证失败 {result}"); return False
+
+    @async_task("权益超市抽奖任务")
+    async def market_raffle_task(self):
+        res = await self.http.post("https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/getUserRaffleCount?id=12&channel=unicomTab", headers={"Authorization": f"Bearer {self.market_token}"}, json={})
+        count = res["result"].get("data", 0) if res["result"] and res["result"].get("code") == 200 else 0
+        self.logger.log(f"权益超市可抽奖次数: {count}")
+        for _ in range(count): await asyncio.sleep(4); await self.market_raffle()
+        if SHOW_PRIZE_POOL: await market_raffle_state.check_prizes(self.http, self.market_token)
+
+    @async_task("权益超市抽奖")
+    async def market_raffle(self):
+        ts = int(time.time() * 1000)
+        query = f"id=12&channel=unicomTab&timeVerRan={ts}"
+        res = await self.http.post(f"https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/userRaffle?{query}", headers=self._get_market_headers("{}", query), json={})
+        if (result := res["result"]) and result.get("code") == 200:
+            data = result.get("data", {})
+            if data.get("isWinning") and (prize := data.get("prizesName")): self.logger.log(f"权益超市抽奖: 恭喜抽中 {prize}", notify=True)
+            else: self.logger.log("权益超市抽奖: 未抽中")
+            return True
+        elif result and result.get("code") == 500: self.logger.log("权益超市: 触发人机验证，自动验证中..."); return await self.market_validate_captcha()
+        self.logger.log(f"权益超市抽奖失败: {result.get('msg', result)}"); return False
+
+    @async_task("优享权益")
+    async def market_privilege_task(self):
+        if not self.market_token: return
+        now = datetime.now()
+        start_time = self._market_privilege_start_time(now)
+        if now < start_time:
+            if (wait_seconds := (start_time - now).total_seconds()) > 300: return self.logger.log(f"优享权益: 未到{MARKET_PRIVILEGE_START_HOUR}点，跳过任务")
+            self.logger.log(f"优享权益: 等待 {wait_seconds:.0f} 秒到{MARKET_PRIVILEGE_START_HOUR}点开抢")
+            if (warmup_sleep := wait_seconds - MARKET_PRIVILEGE_WARMUP_SECONDS) > 0: await asyncio.sleep(warmup_sleep)
+            current_time = datetime.now().strftime("%Y-%m-%d")
+            if cached_activity := await self._warmup_market_privilege(current_time):
+                self.market_privilege_cache = cached_activity
+                self.logger.log(f"优享权益: 已预热缓存 {len(cached_activity.get('detailList', []))} 个权益")
+            await self._wait_market_privilege_start(start_time)
+        stagger_seconds = max(0, (self.index - 1) * MARKET_PRIVILEGE_STAGGER_SECONDS + random.uniform(0.01, 0.05))
+        await asyncio.sleep(stagger_seconds)
+        current_time = datetime.now().strftime("%Y-%m-%d")
+        if self.market_privilege_cache:
+            self.logger.log("优享权益: 使用预热缓存执行解锁后领取")
+            if await self._claim_market_privilege(self.market_privilege_cache, current_time, ignore_stock=True, final_log=False): return
+        activity, result = await self._get_market_privilege_activity(current_time)
+        if not activity: return self.logger.log(f"优享权益: 获取活动详情失败 {self._market_privilege_error(result)}")
+        if activity.get("userAvailableTimes", 0) <= 0: return self.logger.log("优享权益: 今日已领取")
+        await self._claim_market_privilege(activity, current_time)
+
+    def _market_privilege_error(self, result):
+        if not result: return "请求失败"
+        if isinstance(result, dict): return result.get("msg") or result.get("message") or str(result)
+        return str(result)
+
+    def _should_retry_market_privilege(self, result):
+        if not result: return True
+        if not isinstance(result, dict): return False
+        message = f"{result.get('msg', '')} {result.get('message', '')}".upper()
+        code = result.get("code")
+        return code in [500, 502, 503, 504] or "GATEWAY_TIMEOUT" in message or "TIMEOUT" in message
+
+    def _market_privilege_delay(self, attempt, retry_delays=None):
+        delays = retry_delays or MARKET_PRIVILEGE_RETRY_DELAYS
+        return delays[min(attempt - 1, len(delays) - 1)] + random.uniform(0.02, 0.08)
+
+    def _market_privilege_start_time(self, now=None):
+        current = now or datetime.now()
+        return current.replace(hour=MARKET_PRIVILEGE_START_HOUR, minute=0, second=0, microsecond=0)
+
+    async def _wait_market_privilege_start(self, start_time=None):
+        target = start_time or self._market_privilege_start_time()
+        while (remaining := (target - datetime.now()).total_seconds()) > 0:
+            await asyncio.sleep(min(remaining, 0.2))
+
+    def _market_privilege_items(self, detail_list, ignore_stock=False):
+        if not detail_list: return []
+        items = []
+        for item in detail_list:
+            if ignore_stock:
+                items.append(item)
+                continue
+            try: left_quantity = int(item.get("leftQuantity", 0) or 0)
+            except Exception: left_quantity = 0
+            if left_quantity > 0: items.append(item)
+        surprise = sorted([i for i in items if i.get("isSurprise") == 1], key=lambda x: int(x.get("sort", 0) or 0), reverse=True)
+        normal = sorted([i for i in items if i.get("isSurprise") != 1], key=lambda x: int(x.get("sort", 0) or 0), reverse=True)
+        return surprise + normal
+
+    def _market_privilege_already_done(self, result):
+        message = self._market_privilege_error(result)
+        return any(key in message for key in ["今日已领取", "您已领取", "已经领取", "已领取过", "已参与过活动"])
+
+    def _market_privilege_unlock_ready(self, result):
+        message = self._market_privilege_error(result)
+        return any(key in message for key in ["已解锁", "已经解锁", "无需解锁"])
+
+    async def _query_market_receive_record(self):
+        payload = {"isReceive": None, "receiveStatus": None, "limit": 20, "page": 1, "mobile": self.mobile, "businessSources": ["3", "4", "5", "6", "99", "88"], "isPromotion": 1, "returnFormatType": 1}
+        headers = {"Authorization": f"Bearer {self.market_token}", "Content-Type": "application/json", "Origin": "https://contact.bol.wo.cn", "Referer": "https://contact.bol.wo.cn/"}
+        try:
+            res = await self.http.post("https://backward.bol.wo.cn/prod-api/market/contactReceive/queryReceiveRecord", headers=headers, json=payload, timeout=MARKET_PRIVILEGE_RECORD_TIMEOUT, retries=1)
+            if isinstance(result := res["result"], dict) and result.get("code") == 200: return result
+        except Exception: pass
+        return None
+
+    async def _market_privilege_latest_record_today(self, product_name, current_time):
+        if not self.market_token or not self.mobile: return False, None
+        if not (result := await self._query_market_receive_record()): return False, None
+        if not (records := result.get("data", {}).get("recordObjs", [])): return False, None
+        latest = records[0]
+        receive_time, record_name, event_theme = str(latest.get("receiveTime", "") or ""), str(latest.get("recordName", "") or ""), str(latest.get("eventTheme", "") or "")
+        if receive_time.startswith(current_time) and record_name == product_name and event_theme == MARKET_PRIVILEGE_EVENT_THEME: return True, latest
+        return False, latest
+
+    async def _get_market_privilege_activity(self, current_time, action_name="获取活动详情", retries=MARKET_PRIVILEGE_MAX_RETRIES):
+        result = await self._market_privilege_post(
+            "https://backward.bol.wo.cn/prod-api/promotion/activity/roll/getActivitiesDetail",
+            {"majorId": 3, "subCodeList": ["YOUCHOICEONE"], "currentTime": current_time, "withUserStatus": 1},
+            action_name,
+            retries=retries,
+            timeout=MARKET_PRIVILEGE_DETAIL_TIMEOUT,
+        )
+        if isinstance(result, dict) and result.get("code") == 200 and (data_list := result.get("data", [])): return data_list[0], result
+        return None, result
+
+    async def _warmup_market_privilege(self, current_time):
+        activity, _ = await self._get_market_privilege_activity(current_time, action_name="预热获取活动详情", retries=2)
+        return activity
+
+    async def _claim_market_privilege(self, activity, current_time, ignore_stock=False, final_log=True):
+        if not activity: return False
+        if not (candidates := self._market_privilege_items(activity.get("detailList", []), ignore_stock=ignore_stock)):
+            if final_log: self.logger.log("优享权益: 所有权益均无库存")
+            return False
+        act_id, act_code = activity.get("activityId"), activity.get("activityCode", "YOUCHOICEONE")
+        item = candidates[0]
+        name, pid, pcode = item.get("productName", ""), item.get("id"), item.get("productCode", "")
+        if item.get("isSurprise") == 1 and item.get("isUnlock") == 0:
+            unlock_ok, unlock_result = await self._unlock_surprise_privilege(pid, act_code, name)
+            if not unlock_ok and not self._market_privilege_unlock_ready(unlock_result):
+                self.logger.log(f"优享权益: [{name}] 解锁失败 {self._market_privilege_error(unlock_result)}")
+                return False
+        receive_ok, receive_result = await self._receive_privilege(act_id, pid, pcode, item.get("channelId"), item.get("accountType", "4"), current_time, name)
+        if receive_ok: self.logger.log(f"优享权益: [{name}] 领取成功!", notify=True); return True
+        if self._market_privilege_already_done(receive_result):
+            self.logger.log(f"优享权益: [{name}] 今日已领取")
+            return True
+        self.logger.log(f"优享权益: [{name}] 领取失败 {self._market_privilege_error(receive_result)}")
+        if final_log: self.logger.log("优享权益: 首个权益领取失败")
+        return False
+
+    async def _market_privilege_post(self, url, payload, action_name, retries=MARKET_PRIVILEGE_MAX_RETRIES, timeout=MARKET_PRIVILEGE_ACTION_TIMEOUT, retry_delays=None):
+        headers = {"Authorization": f"Bearer {self.market_token}", "Content-Type": "application/json", "Referer": "https://contact.bol.wo.cn/"}
+        last_result = None
+        for attempt in range(1, retries + 1):
+            try:
+                res = await self.http.post(url, headers=headers, json=payload, timeout=timeout, retries=1)
+                last_result = res["result"]
+            except Exception:
+                last_result = None
+            if isinstance(last_result, dict) and last_result.get("code") == 200: return last_result
+            if attempt >= retries or not self._should_retry_market_privilege(last_result): return last_result
+            delay = self._market_privilege_delay(attempt, retry_delays=retry_delays)
+            self.logger.log(f"优享权益: {action_name}超时，第{attempt}次重试等待 {delay:.1f} 秒")
+            await asyncio.sleep(delay)
+        return last_result
+
+    async def _unlock_surprise_privilege(self, product_id, activity_code, product_name=""):
+        try:
+            result = await self._market_privilege_post("https://backward.bol.wo.cn/prod-api/promotion/activity/roll/unlock/surpriseInterest", {"timeVerRan": int(time.time() * 1000), "mobile": self.mobile, "id": product_id, "activityId": activity_code}, f"[{product_name}] 解锁", timeout=MARKET_PRIVILEGE_ACTION_TIMEOUT)
+            return bool(result and result.get("code") == 200), result
+        except: return False, None
+
+    async def _receive_privilege(self, activity_id, product_id, product_code, channel_id, account_type, current_time, product_name=""):
+        headers = {"Authorization": f"Bearer {self.market_token}", "Content-Type": "application/json", "Referer": "https://contact.bol.wo.cn/"}
+        payload = {"channelId": channel_id, "activityId": activity_id, "productId": product_id, "productCode": product_code, "currentTime": current_time, "accountType": account_type}
+        last_result, last_record_check = None, time.monotonic()
+        for attempt in range(1, MARKET_PRIVILEGE_MAX_RETRIES + 1):
+            try:
+                res = await self.http.post("https://backward.bol.wo.cn/prod-api/promotion/activity/roll/receiveRights", headers=headers, json=payload, timeout=MARKET_PRIVILEGE_ACTION_TIMEOUT, retries=1)
+                last_result = res["result"]
+            except Exception:
+                last_result = None
+            if isinstance(last_result, dict) and last_result.get("code") == 200: return True, last_result
+            if self._market_privilege_already_done(last_result): return False, last_result
+            if (now := time.monotonic()) - last_record_check >= MARKET_PRIVILEGE_RECORD_CHECK_INTERVAL:
+                last_record_check = now
+                matched, latest = await self._market_privilege_latest_record_today(product_name, current_time)
+                if matched:
+                    self.logger.log(f"优享权益: [{product_name}] 最新领取记录显示今日已到账，终止重试")
+                    return True, {"code": 200, "msg": "queryReceiveRecord confirmed", "data": latest}
+            if attempt >= MARKET_PRIVILEGE_MAX_RETRIES or not self._should_retry_market_privilege(last_result): return False, last_result
+            delay = self._market_privilege_delay(attempt)
+            self.logger.log(f"优享权益: [{product_name}] 领取超时，第{attempt}次重试等待 {delay:.1f} 秒")
+            await asyncio.sleep(delay)
+        return False, last_result
+
+    def _get_xj_month_activity_id(self):
+        month_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        now = datetime.now()
+        return f"{month_abbr[now.month - 1]}{now.year}Act"
+
+    async def xj_task(self):
+        if "新疆" not in self.province: return
+        if not (ticket_info := await self.open_plat_line_new("https://zy100.xj169.com/touchpoint/openapi/jumpHandRoom1G?source=155&type=02"))["ticket"]: return
+        if await self.xj_get_token(ticket_info["ticket"]):
+            month_activity_id = self._get_xj_month_activity_id()
+            await self.xj_common_high_rest()
+            await self.xj_do_draw(month_activity_id)
+            await self.xj_do_draw(f"daka{month_activity_id}", "daka_sftczxqb_twenty")
+
+    @async_task_silent
+    async def xj_common_high_rest(self):
+        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/themeAct/commonHightRest", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"}, data={"activityId": self._get_xj_month_activity_id()})
+        if (result := res["result"]) and result.get("code") in [0, "SUCCESS"]: self.xj_comm_high_flag = result.get("data", "")
+        else: self.xj_comm_high_flag = ""
+
+    @async_task("新疆联通抽奖")
+    async def xj_do_draw(self, activity_id="", prize_id=""):
+        month_activity_id = self._get_xj_month_activity_id()
+        if not activity_id: activity_id = month_activity_id
+        prize_dict = {"5Gksjhjhyyk": "5G宽视界黄金会员-月卡", "hfq_five": "5元话费券(50-5)", "hfq_ten": "10元话费券(100-10)", "aqyhjVIPhyyk": "爱奇艺黄金VIP会员-月卡", "aqyxzVIPhynk": "爱奇艺星钻VIP会员-年卡", "ddkc30ydjq": "滴滴快车30元代金券", "ddkc5ydjq": "滴滴快车5元代金券", "mgTVhyyk": "芒果TV会员-月卡", "bilibilidhyyk": "哔哩哔哩大会员-月卡", "WPScjhyyk": "WPS超级会员-月卡", "mxbcncqb12y": "蜜雪冰城奶茶券包12元", "spcllxhyyk": "视频彩铃乐享会员-月卡", "mspcllxhyyk": "视频彩铃乐享月卡", "daka_sftczxqb_twenty": "顺丰同城20尊享券包", "daka_tclxjkhyjst": "同程旅行金卡会员九十天"}
+        res = await self.http.post(f"https://zy100.xj169.com/touchpoint/openapi/themeAct/draw_{month_activity_id}", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"}, data={"activityId": activity_id, "prizeId": prize_id, "commHighFlag": getattr(self, "xj_comm_high_flag", "")})
+        msg, data = (result := res["result"]).get("msg"), result.get("data")
+        if msg == "thanks1": self.logger.log(f"新疆联通[{activity_id}]: {data}")
+        elif msg in prize_dict: self.logger.log(f"新疆联通[{activity_id}]抽奖结果: {prize_dict[msg]}", notify=True)
+        elif result.get("code") in [0, "SUCCESS"]: self.logger.log(f"新疆联通[{activity_id}]成功: {msg or data}", notify=True)
+        elif result.get("msgType") == "200": self.logger.log(f"新疆联通[{activity_id}]: 已打过卡")
+        elif data and ("已经打过卡" in str(data) or "机会已用完" in str(data) or "已达上限" in str(data)): self.logger.log(f"新疆联通[{activity_id}]: {data}")
+        else: self.logger.log(f"新疆联通[{activity_id}]失败: {data or msg}")
+
+    async def xj_usersday_task(self):
+        if "新疆" not in self.province: return
+        if not (ticket_info := await self.open_plat_line_new("https://zy100.xj169.com/touchpoint/openapi/jumpHandRoom1G?source=166&type=02"))["ticket"]: return
+        if not await self.xj_get_token(ticket_info["ticket"]): return
+        day, hour = datetime.now().day, datetime.now().hour
+        if hour >= 12:
+            prize_id = "hfq_twenty" if day in [19, 20] else ("right_kdjdjq_ten" if 21 <= day <= 25 else None)
+            if prize_id: await self.xj_usersday_draw(prize_id)
+            else: self.logger.log("联通客户日: 今日无秒杀活动")
+        else: self.logger.log("联通客户日: 未到12点秒杀时间")
+
+    @async_task("新疆联通获取Token")
+    async def xj_get_token(self, ticket):
+        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/getTokenAndCity", headers={"Referer": f"https://zy100.xj169.com/touchpoint/openapi/jumpHandRoom1G?source=166&type=02&ticket={ticket}", "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"}, data={"ticket": ticket})
+        if (result := res["result"]) and result.get("code") == 0:
+            self.xj_token = result.get("data", {}).get("token")
+            return True
+        self.logger.log(f"新疆联通获取Token失败: {result}"); return False
+
+    @async_task("客户日秒杀")
+    async def xj_usersday_draw(self, prize_id):
+        prize_dict = {"hfq_twenty": "20元话费券(100-20)", "right_kdjdjq_ten": "肯德基10元代金券"}
+        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/marchAct/draw_UsersDay2025Act", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest"}, data={"activityId": "usersDay2026Act", "prizeId": prize_id})
+        if (result := res["result"]) and result.get("code") in [0, "SUCCESS"]: self.logger.log(f"客户日秒杀成功: {prize_dict.get(prize_id, prize_id)}", notify=True)
+        else: self.logger.log(f"客户日秒杀失败: {result.get('data') or result.get('msg')}")
+
+    @async_task("签到区-任务中心")
+    async def sign_task_center(self):
+        for _ in range(20):
+            res = await self.http.get("https://activity.10010.com/sixPalaceGridTurntableLottery/task/taskList", params={"type": 2}, headers={"Referer": "https://img.client.10010.com/"})
+            if str(result.get("code", "") if (result := res["result"]) else "") != "0000": return
+            all_tasks = [t for tag in result.get("data", {}).get("tagList", []) for t in tag.get("taskDTOList", [])] + result.get("data", {}).get("taskList", [])
+            all_tasks = [t for t in all_tasks if t]
+            if not all_tasks: break
+            if do_task := next((t for t in all_tasks if t.get("taskState") == "1" and t.get("taskType") == "5"), None): await self.sign_do_task_from_list(do_task); await asyncio.sleep(1); continue
+            if claim_task := next((t for t in all_tasks if t.get("taskState") == "0"), None): await self.sign_get_task_reward(claim_task.get("id")); await asyncio.sleep(1); continue
+            break
+        await self.sign_month_reward()
+
+    @async_task_silent
+    async def sign_month_reward(self):
+        res = await self.http.get("https://activity.10010.com/sixPalaceGridTurntableLottery/floor/getMonthSign", headers={"Referer": "https://img.client.10010.com/"})
+        if str(result.get("code", "") if (result := res["result"]) else "") != "0000": return
+        for task in result.get("data", {}).get("taskList", []):
+            if str(task.get("taskStatus", "")) == "1":
+                reward_res = await self.http.get("https://activity.10010.com/sixPalaceGridTurntableLottery/task/getTaskReward", params={"taskId": task.get("taskId", ""), "taskType": "30", "id": task.get("id", "")}, headers={"Referer": "https://img.client.10010.com/"})
+                if str(rr.get("code", "") if (rr := reward_res["result"]) else "") == "0000":
+                    data = rr.get("data", {})
+                    if str(data.get("code", "")) == "0000": self.logger.log(f"签到区-月签奖励: [{task.get('taskName', '')}] {data.get('prizeName', '')}{data.get('prizeNameRed', '')}", notify=True)
+                await asyncio.sleep(1)
+
+    @async_task("签到区-话费券兑换")
+    async def sign_coupon_exchange(self):
+        enabled_coupons = [name for name, enabled in EXCHANGE_COUPON_CONFIG.items() if enabled]
+        if not enabled_coupons or not (prize_list := await self._get_coupon_prize_list()): return
+        current_points = int(self.initial_telephone_amount * 100)
+        for coupon_name in enabled_coupons:
+            if not (product_id := COUPON_PRODUCT_MAP.get(coupon_name)): continue
+            if not (prize_info := next((p for p in prize_list if p.get("product_id") == product_id), None)): continue
+            if (btn := prize_info.get("buttonDTO")) and btn.get("name") == "面额已参与兑换": self.logger.log(f"签到区-话费券: [{coupon_name}] 今日已兑换"); continue
+            if int(prize_info.get("stockSurplus", 0)) <= 0: continue
+            if current_points < (req := COUPON_POINTS_REQUIRED.get(coupon_name, 0)): self.logger.log(f"签到区-话费券: [{coupon_name}] 积分不足 (需要{req}, 当前{current_points})"); continue
+            for _ in range(3): await self._do_coupon_exchange(product_id, prize_info.get("type_code", "21003_01")); await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
+            if new_list := await self._get_coupon_prize_list():
+                if new_info := next((p for p in new_list if p.get("product_id") == product_id), None):
+                    if (nb := new_info.get("buttonDTO")) and nb.get("name") == "面额已参与兑换": self.logger.log(f"签到区-话费券: [{coupon_name}] 兑换成功!", notify=True)
+                    else: self.logger.log(f"签到区-话费券: [{coupon_name}] 兑换失败")
+                else: self.logger.log(f"签到区-话费券: [{coupon_name}] 验证失败")
+            await asyncio.sleep(1)
+
+    async def _get_coupon_prize_list(self):
+        try:
+            res = await self.http.post("https://act.10010.com/SigninApp/new_convert/prizeList", headers={"Referer": "https://img.client.10010.com/", "Content-Type": "application/x-www-form-urlencoded"}, data="")
+            if (result := res["result"]) and str(result.get("status", "")) == "0000":
+                for tab in result.get("data", {}).get("datails", {}).get("tabItems", []):
+                    if tab.get("defaultShowList") and tab.get("state") == "抢兑中": return tab.get("timeLimitQuanListData", [])
+        except: pass
+        return None
+
+    async def _do_coupon_exchange(self, product_id, type_code):
+        try:
+            uuid_res = await self.http.post("https://act.10010.com/SigninApp/convert/prizeConvert", headers={"Referer": "https://img.client.10010.com/", "Content-Type": "application/x-www-form-urlencoded"}, data=f"product_id={product_id}&typeCode={type_code}")
+            if not ((uuid_result := uuid_res["result"]) and str(uuid_result.get("status", "")) == "0000"): return False
+            if not (uuid := uuid_result.get("data", {}).get("uuid", "")): return False
+            exchange_res = await self.http.post("https://act.10010.com/SigninApp/convert/prizeConvertResult", headers={"Referer": "https://img.client.10010.com/", "Content-Type": "application/x-www-form-urlencoded"}, data=f"uuid={uuid}")
+            return (exchange_result := exchange_res["result"]) and str(exchange_result.get("status", "")) == "0000"
+        except: return False
+
+    @async_task_silent
+    async def sign_do_task_from_list(self, task):
+        if (url := task.get("url", "")) and url != "1" and url.startswith("http"): await self.http.get(url, headers={"Referer": "https://img.client.10010.com/"}); await asyncio.sleep(random.random() * 2)
+        order_id = await self.get_task_order_id()
+        await self.http.get("https://activity.10010.com/sixPalaceGridTurntableLottery/task/completeTask", params={"taskId": task.get("id"), "orderId": order_id, "systemCode": "QDQD"})
+
+    async def get_task_order_id(self):
+        order_id = self.random_string(32).upper()
+        try: await self.http.post("https://m.client.10010.com/taskcallback/topstories/gettaskip", data={"mobile": self.mobile, "orderId": order_id})
+        except: pass
+        return order_id
+
+    @async_task_silent
+    async def sign_get_task_reward(self, task_id):
+        await self.http.get("https://activity.10010.com/sixPalaceGridTurntableLottery/task/getTaskReward", params={"taskId": task_id})
+
+    SEC_UA = "ChinaUnicom4.x/12.3.1 (com.chinaunicom.mobilebusiness; build:77; iOS 16.6.0) Alamofire/4.7.3 unicom{version:iphone_c@12.0301}"
+
+    @async_task("安全管家获取动态验签密鑰")
+    async def _sec_get_secret_key(self):
+        sec_ticket = self.sec_ticket or ""
+        t = unquote(sec_ticket) if sec_ticket else ""
+        headers = {"ticket": t, "partnersid": "1702", "clienttype": "uasp_unicom_applet", "Accept": "application/json, text/plain, */*", "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15", "pageId": "s768590754920323072"}
+        if self.sec_jea_id: headers["Cookie"] = f"_jea_id={self.sec_jea_id}"
+        res = await self.http.get("https://m.jf.10010.com/jf-external-application/jftask/getSecretKey", headers=headers)
+        sc = res.get("headers", {}).get("set-cookie") or res.get("headers", {}).get("Set-Cookie")
+        if sc:
+            for cookie in (sc if isinstance(sc, list) else sc.split(',')):
+                if "_jea_id=" in cookie: self.sec_jea_id = cookie.split("_jea_id=")[1].split(";")[0]; break
+        result = res.get("result", {})
+        if result and str(result.get("code")) == "0000" and (sk := result.get("data", {}).get("secretKey")):
+            self.sec_secret_key = sk; return True
+        self.logger.log(f"安全管家获取验签密鑰失败: {result}"); return False
+
+    @async_task("联通安全管家任务")
+    async def security_butler_task(self):
+        if not self.ecs_token or not self.mobile: return
+        self.sec_old_points = self.sec_ticket1 = self.sec_token = self.sec_ticket = self.sec_jea_id = self.sec_secret_key = None
+        await self._sec_get_ticket_by_native()
+        await self._sec_get_auth_token()
+        await self._sec_get_ticket_for_jf()
+        if not self.sec_ticket or not self.sec_token: return self.logger.log("安全管家获取票据失败，跳过任务")
+        if not await self._sec_get_secret_key(): return self.logger.log("安全管家无法获取验签密鑰，终止任务")
+        await asyncio.sleep(1)
+        await self._sec_get_user_info()
+        await self._sec_execute_all_tasks()
+        await asyncio.sleep(1)
+        await self._sec_get_user_info()
+
+    @async_task("安全管家获取ticket")
+    async def _sec_get_ticket_by_native(self):
+        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        res = await self.http.get(f"https://m.client.10010.com/edop_ng/getTicketByNative?token={self.ecs_token}&appId=edop_unicom_3a6cc75a", headers={"Cookie": f"PvSessionId={ts}{self.unicom_token_id};c_mobile={self.mobile};c_version=iphone_c@11.0800;ecs_token={self.ecs_token}", "Accept": "*", "Connection": "keep-alive", "Content-Type": "application/x-www-form-urlencoded", "Host": "m.client.10010.com", "User-Agent": self.SEC_UA})
+        if result := res["result"]: self.sec_ticket1 = result.get("ticket")
+
+    @async_task("安全管家获取token")
+    async def _sec_get_auth_token(self):
+        if not self.sec_ticket1: return
+        res = await self.http.post("https://uca.wo116114.com/api/v1/auth/ticket?product_line=uasp&entry_point=h5&entry_point_id=edop_unicom_3a6cc75a", headers={"User-Agent": self.SEC_UA, "Content-Type": "application/json", "clientType": "uasp_unicom_applet"}, json={"productId": "", "type": 1, "ticket": self.sec_ticket1})
+        if (result := res["result"]) and result.get("data"): self.sec_token = result["data"].get("access_token")
+
+    @async_task("安全管家获取积分票据")
+    async def _sec_get_ticket_for_jf(self):
+        if not self.sec_token: return
+        res = await self.http.post("https://uca.wo116114.com/api/v1/auth/getTicket?product_line=uasp&entry_point=h5&entry_point_id=edop_unicom_3a6cc75a", headers={"User-Agent": self.SEC_UA, "Content-Type": "application/json", "auth-sa-token": self.sec_token, "clientType": "uasp_unicom_applet"}, json={"productId": "91311616", "phone": self.mobile})
+        if not ((result := res["result"]) and result.get("data")): return
+        self.sec_ticket = result["data"].get("ticket")
+        res2 = await self.http.post("https://m.jf.10010.com/jf-external-application/page/query", headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15", "partnersid": "1702", "ticket": unquote(self.sec_ticket) if self.sec_ticket else "", "clienttype": "uasp_unicom_applet"}, json={"activityId": "s747395186896173056", "partnersId": "1702"})
+        if sc := res2.get("headers", {}).get("set-cookie") or res2.get("headers", {}).get("Set-Cookie"):
+            for cookie in sc if isinstance(sc, list) else [sc]:
+                if cookie and cookie.startswith("_jea_id="): self.sec_jea_id = cookie.split(";")[0].split("=")[1]; break
+
+    async def _sec_operate_blacklist(self, phone_number, op_type):
+        try:
+            json_data = {"productId": "91015539", "type": 1, "operationType": op_type, "contents": [{"content": phone_number, "contentTag": "", "nickname": None, "configTime": None}]}
+            if op_type == 0: json_data["blacklistSource"] = 0
+            res = await self.http.post("https://uca.wo116114.com/sjgj/woAssistant/umm/configs/v1/config?product_line=uasp&entry_point=h5&entry_point_id=wxdefbc1986dc757a6", headers={"User-Agent": self.SEC_UA, "auth-sa-token": self.sec_token, "clientType": "uasp_unicom_applet", "token": self.sec_token, "Content-Type": "application/json"}, json=json_data)
+            return res["result"]
+        except Exception as e: self.logger.log(f"安全管家操作黑名单异常: {e}"); return None
+
+    async def _sec_add_to_blacklist(self):
+        phone = "13088888888"
+        if (result := await self._sec_operate_blacklist(phone, 0)) and (result.get("code") in ["0000", 0] or result.get("msg") == "成功"): return
+        if result and "号码已存在" in result.get("msg", ""):
+            if (del_r := await self._sec_operate_blacklist(phone, 1)) and (del_r.get("code") in ["0000", 0] or "成功" in str(del_r.get("msg", ""))): await asyncio.sleep(1); await self._sec_operate_blacklist(phone, 0)
+
+    @async_task_silent
+    async def _sec_mark_phone_number(self):
+        await self.http.post("https://uca.wo116114.com/sjgj/unicomAssistant/uasp/configs/v1/addressBook/saveTagPhone?product_line=uasp&entry_point=h5&entry_point_id=wxdefbc1986dc757a6", headers={"User-Agent": self.SEC_UA, "auth-sa-token": self.sec_token, "clientType": "uasp_unicom_applet", "Content-Type": "application/json"}, json={"tagPhoneNo": "13088330789", "tagIds": [26], "status": 0, "productId": "91311616"})
+
+    @async_task_silent
+    async def _sec_sync_address_book(self):
+        await self.http.post("https://uca.wo116114.com/sjgj/unicomAssistant/uasp/configs/v1/addressBookBatchConfig?product_line=uasp&entry_point=h5&entry_point_id=edop_unicom_3a6cc75a", headers={"User-Agent": self.SEC_UA, "auth-sa-token": self.sec_token, "clientType": "uasp_unicom_applet", "Content-Type": "application/json"}, json={"addressBookDTOList": [{"addressBookPhoneNo": "13088888888", "addressBookName": "水水"}], "productId": "91311616", "opType": "1"})
+
+    @async_task_silent
+    async def _sec_set_interception_rules(self):
+        await self.http.post("https://uca.wo116114.com/sjgj/woAssistant/umm/configs/v1/config?product_line=uasp&entry_point=h5&entry_point_id=wxdefbc1986dc757a6", headers={"User-Agent": self.SEC_UA, "auth-sa-token": self.sec_token, "clientType": "uasp_unicom_applet", "Content-Type": "application/json"}, json={"contents": [{"name": "rings-once", "contentTag": "8", "contentName": "响一声", "content": "0", "icon": "alerting"}], "operationType": 0, "type": 3, "productId": "91311616"})
+
+    @async_task_silent
+    async def _sec_view_weekly_summary(self):
+        sec_headers = {"auth-sa-token": self.sec_token, "clientType": "uasp_unicom_applet", "Content-Type": "application/json"}
+        await self.http.post("https://uca.wo116114.com/sjgj/unicomAssistant/uasp/configs/v1/weeklySwitchStatus?product_line=uasp&entry_point=h5&entry_point_id=wxdefbc1986dc757a6", headers=sec_headers, json={"productId": "91311616"})
+        await self.http.post("https://uca.wo116114.com/sjgj/unicomAssistant/uasp/report/v1/queryKeyData?product_line=uasp&entry_point=h5&entry_point_id=wxdefbc1986dc757a6", headers=sec_headers, json={"productId": "91311616"})
+        await self.http.post("https://uca.wo116114.com/sjgj/unicomAssistant/uasp/report/v1/weeklySummary?product_line=uasp&entry_point=h5&entry_point_id=wxdefbc1986dc757a6", headers=sec_headers, json={"productId": "91311616"})
+
+    @async_task_silent
+    async def _sec_sign_in(self, task_code):
+        await self.http.post("https://m.jf.10010.com/jf-external-application/uasptask/sign", headers={**_sec_headers(self)}, json={"taskCode": task_code})
+
+    @async_task_silent
+    async def _sec_receive_points(self, task_code):
+        await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/receive", headers={**_sec_headers(self)}, json={"taskCode": task_code})
+
+    @async_task("安全管家执行任务")
+    async def _sec_finish_task(self, task_code, task_name):
+        await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/toFinish", headers={**_sec_headers(self)}, json={"taskCode": task_code})
+        task_handlers = {"联通助理-添加黑名单": self._sec_add_to_blacklist, "联通助理-号码标记": self._sec_mark_phone_number, "联通助理-同步通讯录": self._sec_sync_address_book, "联通助理-骚扰拦截设置": self._sec_set_interception_rules, "联通助理-查看周报": self._sec_view_weekly_summary}
+        if handler := task_handlers.get(task_name): await handler()
+        await self.jf_task_finish_common(self.sec_ticket, self.sec_jea_id, "uasp_unicom_applet", "1702", task_code)
+
+    @async_task_silent
+    async def jf_task_finish_common(self, ticket, jea_id, client_type, partners_id, task_code):
+        headers = {"ticket": unquote(ticket) if ticket else "", "Cookie": f"_jea_id={jea_id}" if jea_id else "", "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15", "partnersid": partners_id, "clienttype": client_type, "Content-Type": "application/json"}
+        await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/taskFinish", headers=headers, json={"taskCode": task_code})
+
+    @async_task("安全管家执行所有任务")
+    async def _sec_execute_all_tasks(self):
+        res = await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/taskDetail", headers={**_sec_headers(self)}, json={})
+        if not (result := res["result"]) or not result.get("data") or not result["data"].get("taskDetail"): return self.logger.log("安全管家: 查询任务列表失败")
+        executable_names = {"联通助理-添加黑名单", "联通助理-号码标记", "联通助理-同步通讯录", "联通助理-骚扰拦截设置", "联通助理-查看周报"}
+        for task in result["data"]["taskDetail"].get("taskList", []):
+            task_code, task_name = task.get("taskCode", ""), task.get("taskName", "")
+            if task_name not in executable_names and "签到" not in task_name: continue
+            if (remaining := task.get("needCount", 1) - task.get("finishCount", 0)) > 0:
+                for _ in range(remaining):
+                    await asyncio.sleep(1)
+                    try:
+                        if "签到" in task_name: await self._sec_sign_in(task_code); await self._sec_receive_points(task_code); break
+                        else: await self._sec_finish_task(task_code, task_name); await asyncio.sleep(1); await self._sec_receive_points(task_code)
+                    except: break
+            elif task.get("finishText") == "待领取": await asyncio.sleep(1); await self._sec_receive_points(task_code)
+
+    @async_task("安全管家获取积分")
+    async def _sec_get_user_info(self):
+        res = await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/userInfo", headers={**_sec_headers(self), "User-Agent": "Mozilla/5.0 (Linux; Android 9; ONEPLUS A5000) AppleWebKit/537.36"}, json={})
+        if not (result := res["result"]) or result.get("code") != "0000" or not result.get("data"): return self.logger.log(f"安全管家: 查询积分失败: {result.get('msg') if result else '无响应'}")
+        current_points = int(result["data"].get("availableScore", 0))
+        if self.sec_old_points is None: self.sec_old_points = current_points
+        elif (gained := current_points - self.sec_old_points) > 0: self.logger.log(f"安全管家: 本次获得{gained}积分", notify=True)
+
+    async def shangdu_task(self):
+        if "河南" not in self.province: return
+        if not (ticket := await self.shangdu_get_ticket()) or not await self.shangdu_login(ticket): return
+        await asyncio.sleep(1)
+        if (signed := await self.shangdu_get_sign_status()) is False: await self.shangdu_signin()
+        elif signed is True: self.logger.log("商都福利: 今日已签到")
+        await asyncio.sleep(1)
+        if not (lottery_info := await self.shangdu_get_lottery_info()) or not lottery_info.get("lotteryFlag"): return
+        for _ in range(int(lottery_info.get("lotteryTimes", 0) or 0)): await asyncio.sleep(1); await self.shangdu_draw()
+
+    async def shangdu_get_ticket(self):
+        if not getattr(self, "ecs_token", None): self.logger.log("商都福利: 缺少 ecs_token，请检查是否已执行 online 登录"); return None
+        try:
+            res = await self.http.get("https://m.client.10010.com/edop_ng/getTicketByNative", params={"token": self.ecs_token, "appId": "edop_unicom_4b80047a"})
+            if isinstance((r := res["result"]), dict) and r.get("rsp_code") == "0000": return r.get("ticket")
+            self.logger.log(f"商都福利: Ticket 获取失败 {r}"); return None
+        except Exception as e: self.logger.log(f"商都福利获取Ticket异常: {e}"); return None
+
+    async def shangdu_api(self, method, path, **kwargs):
+        headers = {"Host": "app.shangdu.com", "Origin": "https://app.shangdu.com", "Referer": "https://app.shangdu.com/monthlyBenefit/index.html", "edop_flag": "0", "Accept": "*"}
+        if method == "POST": headers["Content-Type"] = "application/json"
+        return (await self.http.request(method, f"https://app.shangdu.com/monthlyBenefit/v1/{path}", headers={**headers, **kwargs.pop('headers', {})}, **kwargs))["result"]
+
+    async def shangdu_login(self, ticket):
+        try:
+            await self.shangdu_api("POST", "common/getKey", json={"scene": "monthlybenefit"})
+            if isinstance((r := await self.shangdu_api("GET", f"common/config?ticket={ticket}")), dict) and r.get("code") == "0000": return True
+            self.logger.log(f"商都福利: 登录激活失败 {r}"); return False
+        except Exception as e: self.logger.log(f"商都福利登录异常: {e}"); return False
+
+    async def shangdu_get_sign_status(self):
+        try:
+            r = await self.shangdu_api("POST", "signIn/queryCumulativeSignAxis", json={})
+            return r.get("data", {}).get("todaySignFlag") == "1" if isinstance(r, dict) and r.get("code") == "0000" else None
+        except: return None
+
+    @async_task("商都福利签到")
+    async def shangdu_signin(self):
+        if not isinstance((result := await self.shangdu_api("POST", "signIn/userSignIn", json={})), dict): return
+        if result.get("code") == "0000" and str(result.get("data", {}).get("signFlag", "")) == "1": self.logger.log("商都福利签到成功")
+        elif await self.shangdu_get_sign_status() is True: self.logger.log("商都福利: 今日已签到")
+        else: self.logger.log(f"商都福利签到失败: {result.get('msg') or result.get('desc') or result}")
+
+    @async_task_silent
+    async def shangdu_get_lottery_info(self):
+        if isinstance((result := await self.shangdu_api("POST", "lottery/getLotteryInfo", json={})), dict) and result.get("code") == "0000": return result.get("data", {})
+        self.logger.log(f"商都福利获取抽奖次数失败: {result}")
+        return None
+
+    @async_task("商都福利抽奖")
+    async def shangdu_draw(self):
+        if not isinstance((lottery := await self.shangdu_api("POST", "lottery/lottery", json={})), dict) or lottery.get("code") != "0000":
+            return self.logger.log(f"商都福利抽奖失败: {lottery}")
+        if not (draw_uuid := lottery.get("data", {}).get("uuid")): return self.logger.log("商都福利抽奖失败: 缺少uuid")
+        if not isinstance((result := await self.shangdu_api("POST", "lottery/lotteryResult", json={"uuid": draw_uuid})), dict) or result.get("code") != "0000":
+            return self.logger.log(f"商都福利查询抽奖结果失败: {result}")
+        data = result.get("data", {})
+        if str(data.get("isWin")) == "1": self.logger.log(f"商都福利抽奖: {data.get('prizeName', '中奖')}", notify=True)
+        else: self.logger.log("商都福利抽奖: 未中奖")
+
+    async def user_task(self):
+        try:
+            if not await self.online(): return
+            for task in [
+                self.pan_speed_task,
+                self.market_task,
+                self.sign_task,
+                self.xj_task,
+                self.ttlxj_task,
+                self.ltzf_task,
+                self.wostore_cloud_task,
+                self.security_butler_task,
+                self.shangdu_task,
+            ]: await task()
+        finally:
+            await self.http.close()
+
+async def main():
+    start_time = datetime.now()
+    print(f"开始运行时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    if not (cookies := os.environ.get("chinaUnicomCookie", "")): return print("未找到 chinaUnicomCookie 环境变量")
+    tasks = [CustomUserService(cookie, index=i + 1).user_task() for i, cookie in enumerate(cookies.split("@")) if cookie.strip()]
+    if tasks: print(f"启动 {len(tasks)} 个账号任务 (并行模式)..."); await asyncio.gather(*tasks)
+    print(f"\n运行结束, 总用时: {datetime.now() - start_time}")
+
+if __name__ == "__main__": asyncio.run(main())
