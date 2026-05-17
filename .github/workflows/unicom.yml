@@ -24,6 +24,6 @@ jobs:
 
     - name: Run Script
       env:
-        chinaUnicomCookie: ${{ secrets.CHINA_UNICOM_COOKIE }}
+        chinaUnicomCookie: ${{ secrets.chinaUnicomCookie }}
       run: |
         python china_unicom.py
